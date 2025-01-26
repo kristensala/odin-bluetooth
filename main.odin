@@ -28,7 +28,7 @@ Hci_Filter :: struct {
 
 Hci_State :: struct {
     device_id: i32,
-    device_handle: int,
+    device_handle: i32,
     original_filter: Hci_Filter,
     state: Hci_Scanning_State,
     has_error: bool,
@@ -63,9 +63,6 @@ foreign hci_lib {
     hci_inquiry :: proc(dev_id: int, len: int, num_rsp: int, lap: ^int, inquiry_info: ^[dynamic]Inquiry_info, flags: int) -> c.int ---
     hci_le_set_scan_enable :: proc(dev_id: int, enable: u8, filter_dup: u8, to: int) -> c.int ---
     hci_le_set_scan_parameters :: proc(dev_id: int, type: u8, interval: u16, window: u16, own_type: u8, filter: u8, to: int) -> c.int ---
-    //hci_filter_clear :: proc(hci_filter: ^Hci_Filter) ---
-    //hci_filter_set_ptype :: proc(t: int, hci_filter: ^Hci_Filter) ---
-    //hci_filter_set_event :: proc(e: int, hci_filter: ^Hci_Filter) ---
 }
 
 foreign import bluetooth "system:bluetooth"
@@ -90,24 +87,26 @@ foreign libc {
         option_value: rawptr,
         option_len:   int,
     ) -> c.int ---
+}
 
+foreign import hci_custom_lib "hci_custom_lib.a"
+foreign hci_custom_lib {
+    hci_filter_set_ptype :: proc(t: int, hci_filter: ^Hci_Filter) ---
+    hci_filter_set_event :: proc(e: int, hci_filter: ^Hci_Filter) ---
+    htobs :: proc(x: u16) -> c.uint16_t ---
 }
 
 bswap_16 :: proc(value: int) -> int {
     return (value >> 8) | (value << 8)
 }
 
-hci_set_bit :: proc(nr: int, addr: ^u32) {
-    //return addr + (nr >> 5) &= ~(1 << (nr & 31))
-}
-
 main :: proc() {
     state := open_dev()
-    start_le_scan(&state)
+    start_le_scan(state)
 }
 
-open_dev :: proc() -> Hci_State {
-    current_hci_state: Hci_State
+open_dev :: proc() -> ^Hci_State {
+    current_hci_state := new(Hci_State)
     current_hci_state.device_id = hci_get_route(nil)
 
     open_dev := hci_open_dev(int(current_hci_state.device_id))
@@ -117,13 +116,14 @@ open_dev :: proc() -> Hci_State {
         return current_hci_state;
     }
 
+    current_hci_state.device_handle = open_dev
 
-    err := net.set_blocking(net.TCP_Socket(current_hci_state.device_handle), false)
+    /*err := net.set_blocking(net.TCP_Socket(current_hci_state.device_handle), false)
     if err != nil {
         current_hci_state.has_error = true
         fmt.println("could not set socker nonblocking")
         return current_hci_state
-    }
+    }*/
 
     current_hci_state.state = .HCI_STATE_OPEN
     return current_hci_state
@@ -132,15 +132,29 @@ open_dev :: proc() -> Hci_State {
 
 //https://github.com/carsonmcdonald/bluez-experiments/blob/master/experiments/scantest.c
 start_le_scan :: proc(hci_state: ^Hci_State) {
+    new_filter: Hci_Filter
+    hci_filter_set_ptype(HCI_EVENT_PKT, &new_filter)
+    hci_filter_set_event(EVT_LE_META_EVENT, &new_filter)
+
+    res2 := setsockopt(int(hci_state.device_handle), 0, 2, &new_filter, size_of(new_filter))
+    if res2 < 0  {
+        hci_state.has_error = true
+        fmt.println("setsockopt failed")
+        return
+    }
+
+    hci_le_set_scan_enable(int(hci_state.device_handle), 0x00, 0, 1000);
+
     hci_scan_params := hci_le_set_scan_parameters(
-        hci_state.device_handle,
+        int(hci_state.device_handle),
         0x01,
-        u16(bswap_16(0x0010)),
-        u16(bswap_16(0x0010)),
+        htobs(0x0010),
+        htobs(0x0010),
         0x00,
-        0x00,
+        0,
         1000
     )
+    fmt.println("here: ", hci_scan_params)
 
     if hci_scan_params < 0 {
         hci_state.has_error = true
@@ -148,7 +162,7 @@ start_le_scan :: proc(hci_state: ^Hci_State) {
         return;
     }
 
-    hci_le_scan_enabled := hci_le_set_scan_enable(hci_state.device_handle, 0x01, 1, 1000)
+    hci_le_scan_enabled := hci_le_set_scan_enable(int(hci_state.device_handle), 0x01, 1, 1000)
     if hci_le_scan_enabled < 0 {
         hci_state.has_error = true
         fmt.println("Faild to enable hci_le_scan")
@@ -158,23 +172,10 @@ start_le_scan :: proc(hci_state: ^Hci_State) {
     hci_state.state = .SCANNING
 
 
-    res := getsockopt(hci_state.device_handle, 0, 2, &hci_state.original_filter, size_of(hci_state.original_filter))
+    res := getsockopt(int(hci_state.device_handle), 0, 2, &hci_state.original_filter, size_of(hci_state.original_filter))
     if res < 0 {
         hci_state.has_error = true
         fmt.println("getsockopt failed")
-        return
-    }
-
-    new_filter: Hci_Filter
-    free(&new_filter)
-    //hci_filter_clear(&new_filter)
-    //hci_filter_set_ptype(HCI_EVENT_PKT, &new_filter)
-    //hci_filter_set_event(EVT_LE_META_EVENT, &new_filter)
-
-    res2 := setsockopt(hci_state.device_handle, 0, 2, &new_filter, size_of(new_filter))
-    if res2 < 0  {
-        hci_state.has_error = true
-        fmt.println("setsockopt failed")
         return
     }
 
